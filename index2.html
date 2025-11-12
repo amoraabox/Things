@@ -1,0 +1,690 @@
+<!--
+README (top of index.html)
+==========================================
+Things — single-file self-improvement dashboard
+How to use:
+1. Save this file as `index.html` and push it to a GitHub repo.
+   - To deploy on GitHub Pages: create a repo, push this file to `main`, then go to Settings -> Pages -> Deploy from branch -> `main` / `/root`.
+   - Or drop into `gh-pages` branch or use Vercel for automatic deploy from GitHub.
+
+2. Firebase (optional but recommended):
+   - Create a Firebase project: https://console.firebase.google.com/
+   - Add a web app and copy the config object (apiKey, authDomain, projectId, etc.).
+   - Enable Firestore (Databases -> Create database -> start in test mode for dev).
+   - Replace the FIREBASE_CONFIG placeholder object below with your config.
+   - IMPORTANT: For initial dev you can run test rules. For production change rules to require authentication.
+   - After adding config, reload the page. The app will attempt to sync to Firestore under `things/user_default`.
+
+3. Local usage:
+   - If Firebase is not configured or offline, the app will use `localStorage`.
+   - You can clear local data in Settings.
+
+4. Notes:
+   - This file uses React + Tailwind via CDN and Firebase compat SDK via CDN.
+   - Everything is contained in this single file so there's no build step.
+
+==========================================
+-->
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Things — Personal Self Improvement Dashboard</title>
+
+  <!-- Tailwind CDN (Tailwind Play) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Small style customizations for iOS look -->
+  <style>
+    html, body, #root { height: 100%; }
+    body { background: #F7F8FA; font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Helvetica Neue", Arial; -webkit-font-smoothing:antialiased; -moz-osx-font-smoothing:grayscale; }
+    .card-shadow { box-shadow: 0 8px 30px rgba(20,20,40,0.06); }
+    .glass { backdrop-filter: blur(6px); background: rgba(255,255,255,0.6); }
+    /* progress ring container sizing */
+    .ring-size { width: 110px; height: 110px; }
+    /* bottom tab bar notch center */
+    .tabbar { box-shadow: 0 12px 30px rgba(10,10,30,0.08); }
+  </style>
+
+  <!-- Firebase compat SDKs (CDN) -->
+  <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-firestore-compat.js"></script>
+
+  <!-- React & Babel (for JSX in-browser) -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+  <div id="root" class="min-h-screen flex items-center justify-center p-4"></div>
+
+  <!-- FIREBASE_CONFIG placeholder
+       Replace the object below with your config from Firebase console.
+       Example:
+       const FIREBASE_CONFIG = {
+         apiKey: "AIza...x",
+         authDomain: "your-app.firebaseapp.com",
+         projectId: "your-app",
+         storageBucket: "your-app.appspot.com",
+         messagingSenderId: "12345",
+         appId: "1:123:web:abc"
+       };
+  -->
+  <script>
+    // Paste your Firebase config below. If you leave the placeholder as-is,
+    // the app will run with localStorage-only mode and show a banner.
+    const FIREBASE_CONFIG = {
+      // "apiKey": "PLEASE_PASTE_FIREBASE_CONFIG_HERE",
+      // paste your firebase config here to enable Firestore sync.
+    };
+  </script>
+
+  <!-- Main App (React) -->
+  <script type="text/babel">
+  const { useState, useEffect, useRef } = React;
+
+  /* ---------------------------
+     Sample data & utilities
+     --------------------------- */
+  const SAMPLE_ROUTINES = [
+    { id: 'fitness-1', type: 'fitness', title: 'Morning Run', time: '07:00', duration: 30, completedDates: [] },
+    { id: 'fitness-2', type: 'fitness', title: 'Stretch 10 min', time: '07:40', duration: 10, completedDates: [] },
+    { id: 'eating-1', type: 'eating', title: 'Healthy Breakfast', time: '08:00', duration: 20, completedDates: [] },
+    { id: 'learning-1', type: 'learning', title: 'Read 20 pages', time: '20:00', duration: 40, completedDates: [] }
+  ];
+
+  const STORAGE_KEY = 'things_routines_v1';
+  const SYNC_QUEUE_KEY = 'things_sync_queue_v1';
+  const FIRESTORE_DOC_PATH = { collection: 'things', doc: 'user_default' }; // ready to be changed for multi-user later
+
+  // returns today's ISO date string 'YYYY-MM-DD'
+  function todayISO() {
+    const d = new Date();
+    const tz = d.getTimezoneOffset() * 60000;
+    const local = new Date(Date.now() - tz);
+    return local.toISOString().slice(0,10);
+  }
+
+  // generate a short id
+  function uid(prefix='id') {
+    return prefix + '-' + Math.random().toString(36).slice(2,9);
+  }
+
+  /* ---------------------------
+     Firebase helpers (compat SDK)
+     --------------------------- */
+  let firebaseAvailable = false;
+  let firebaseApp = null;
+  let firestore = null;
+
+  function tryInitFirebase() {
+    try {
+      // If config is empty or not filled, skip
+      if (!FIREBASE_CONFIG || !FIREBASE_CONFIG.apiKey) {
+        firebaseAvailable = false;
+        console.warn('Firebase config not provided — running in localStorage-only mode.');
+        return;
+      }
+      // Initialize (compat)
+      firebaseApp = firebase.initializeApp(FIREBASE_CONFIG);
+      firestore = firebase.firestore();
+      firebaseAvailable = true;
+      console.log('Firebase initialized.');
+    } catch (e) {
+      firebaseAvailable = false;
+      console.error('Firebase init failed:', e);
+    }
+  }
+
+  // Read doc from firestore
+  async function firestoreLoadRoutines() {
+    if (!firebaseAvailable) throw new Error('Firebase not available');
+    const docRef = firestore.collection(FIRESTORE_DOC_PATH.collection).doc(FIRESTORE_DOC_PATH.doc);
+    const doc = await docRef.get();
+    if (!doc.exists) return null;
+    return doc.data().routines || null;
+  }
+
+  // Write doc to firestore (overwrites)
+  async function firestoreSaveRoutines(routines) {
+    if (!firebaseAvailable) throw new Error('Firebase not available');
+    const docRef = firestore.collection(FIRESTORE_DOC_PATH.collection).doc(FIRESTORE_DOC_PATH.doc);
+    await docRef.set({ routines, updatedAt: new Date().toISOString() });
+    return true;
+  }
+
+  /* ---------------------------
+     Local storage helpers
+     --------------------------- */
+  function loadLocalRoutines() {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return null;
+      return JSON.parse(raw);
+    } catch (e) {
+      console.error('Failed to load from localStorage', e);
+      return null;
+    }
+  }
+
+  function saveLocalRoutines(routines) {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(routines));
+      return true;
+    } catch (e) {
+      console.error('Failed to save to localStorage', e);
+      return false;
+    }
+  }
+
+  // simple queue for pending sync ops
+  function pushSyncQueue(item) {
+    const raw = localStorage.getItem(SYNC_QUEUE_KEY);
+    const q = raw ? JSON.parse(raw) : [];
+    q.push(item);
+    localStorage.setItem(SYNC_QUEUE_KEY, JSON.stringify(q));
+  }
+  async function flushSyncQueue() {
+    if (!firebaseAvailable) return false;
+    try {
+      const raw = localStorage.getItem(SYNC_QUEUE_KEY);
+      const q = raw ? JSON.parse(raw) : [];
+      if (!q.length) return true;
+      // For now, we simply re-save the entire routines doc on each queued operation.
+      // This is intentionally simple and robust for single-user usage.
+      // Pop each operation and apply last-known full write if present.
+      const last = q[q.length-1];
+      if (last && last.fullRoutines) {
+        await firestoreSaveRoutines(last.fullRoutines);
+      }
+      localStorage.removeItem(SYNC_QUEUE_KEY);
+      return true;
+    } catch (e) {
+      console.error('Failed to flush sync queue', e);
+      return false;
+    }
+  }
+
+  /* ---------------------------
+     High-level load/save + sync
+     --------------------------- */
+  async function loadRoutinesSource() {
+    // 1) Try Firestore if available, else localStorage
+    tryInitFirebase();
+    if (firebaseAvailable) {
+      try {
+        const remote = await firestoreLoadRoutines();
+        if (remote && Array.isArray(remote)) {
+          // remote routines exist
+          saveLocalRoutines(remote);
+          return remote;
+        } else {
+          // no remote; use local or sample
+          const local = loadLocalRoutines();
+          if (local) return local;
+          saveLocalRoutines(SAMPLE_ROUTINES);
+          // also queue a save to firebase
+          pushSyncQueue({ type: 'init', fullRoutines: SAMPLE_ROUTINES });
+          return SAMPLE_ROUTINES;
+        }
+      } catch (e) {
+        console.warn('Could not read Firestore — falling back to localStorage', e);
+        const local = loadLocalRoutines();
+        if (local) return local;
+        saveLocalRoutines(SAMPLE_ROUTINES);
+        return SAMPLE_ROUTINES;
+      }
+    } else {
+      // no firebase configured
+      const local = loadLocalRoutines();
+      if (local) return local;
+      saveLocalRoutines(SAMPLE_ROUTINES);
+      return SAMPLE_ROUTINES;
+    }
+  }
+
+  async function saveRoutinesSource(routines) {
+    // save local first
+    saveLocalRoutines(routines);
+
+    // attempt firebase write if available
+    if (firebaseAvailable) {
+      try {
+        await firestoreSaveRoutines(routines);
+        // try flush queue too
+        await flushSyncQueue();
+      } catch (e) {
+        console.warn('Failed to save to Firestore, queuing operation', e);
+        pushSyncQueue({ type: 'save', fullRoutines: routines });
+      }
+    } else {
+      // queue operation (so when user adds config later we can attempt flush)
+      pushSyncQueue({ type: 'save', fullRoutines: routines });
+    }
+  }
+
+  /* ---------------------------
+     Utility: compute analytics
+     - percentComplete for today
+     - streak: consec days where >=1 routine completed
+     --------------------------- */
+  function percentCompleteToday(routines) {
+    const today = todayISO();
+    if (!routines.length) return 0;
+    let totalItems = routines.length;
+    let done = routines.filter(r => r.completedDates && r.completedDates.includes(today)).length;
+    return Math.round((done / totalItems) * 100);
+  }
+
+  function getStreak(routines) {
+    // Count consecutive days up to today where at least one routine completed
+    // Build a set of dates with completions
+    const completions = new Set();
+    routines.forEach(r => {
+      (r.completedDates || []).forEach(d => completions.add(d));
+    });
+    // iterate days back from today
+    let streak = 0;
+    let dt = new Date();
+    while (true) {
+      const iso = new Date(dt.getTime() - dt.getTimezoneOffset()*60000).toISOString().slice(0,10);
+      if (completions.has(iso)) {
+        streak++;
+        dt.setDate(dt.getDate() - 1); // previous day
+      } else break;
+    }
+    return streak;
+  }
+
+  /* ---------------------------
+     App Component
+     --------------------------- */
+  function App() {
+    const [routines, setRoutines] = useState([]);
+    const [loading, setLoading] = useState(true);
+    const [page, setPage] = useState('dashboard'); // dashboard, tracker, analytics, settings
+    const [activeTab, setActiveTab] = useState('fitness'); // for tracker
+    const [accent, setAccent] = useState('fitness'); // 'fitness' | 'eating' | 'learning'
+    const [firebaseConfigured, setFirebaseConfigured] = useState(false);
+    const [showConfigBanner, setShowConfigBanner] = useState(false);
+
+    // load on mount
+    useEffect(() => {
+      (async () => {
+        setLoading(true);
+        tryInitFirebase();
+        setFirebaseConfigured(firebaseAvailable);
+        if (!firebaseAvailable) setShowConfigBanner(true);
+        const loaded = await loadRoutinesSource();
+        setRoutines(loaded);
+        setLoading(false);
+        // attempt to flush queue if firebase becomes available later
+        if (firebaseAvailable) {
+          try { await flushSyncQueue(); } catch(e){}
+        }
+      })();
+
+      // online/offline listener to attempt sync
+      const onOnline = async () => {
+        tryInitFirebase();
+        if (firebaseAvailable) {
+          setFirebaseConfigured(true);
+          setShowConfigBanner(false);
+          await flushSyncQueue();
+          // optionally pull remote to merge (keeping local as priority for now)
+          try {
+            const remote = await firestoreLoadRoutines();
+            if (remote) {
+              setRoutines(remote);
+              saveLocalRoutines(remote);
+            }
+          } catch(e) {}
+        }
+      };
+      window.addEventListener('online', onOnline);
+      return () => window.removeEventListener('online', onOnline);
+    }, []);
+
+    // Save routines when changed (debounce)
+    const saveTimeout = useRef(null);
+    useEffect(() => {
+      if (loading) return;
+      if (saveTimeout.current) clearTimeout(saveTimeout.current);
+      saveTimeout.current = setTimeout(() => {
+        saveRoutinesSource(routines);
+      }, 400);
+      return () => clearTimeout(saveTimeout.current);
+    }, [routines]);
+
+    // small helpers
+    function addRoutine(type, title, time='08:00', duration=15) {
+      const r = { id: uid(type), type, title, time, duration, completedDates: [] };
+      setRoutines(prev => [r, ...prev]);
+      setPage('tracker');
+      setActiveTab(type);
+    }
+
+    function editRoutine(id, patch) {
+      setRoutines(prev => prev.map(r => r.id === id ? { ...r, ...patch } : r));
+    }
+
+    function deleteRoutine(id) {
+      if (!confirm('Delete this routine?')) return;
+      setRoutines(prev => prev.filter(r => r.id !== id));
+    }
+
+    function toggleComplete(id, date = todayISO()) {
+      setRoutines(prev => prev.map(r => {
+        if (r.id !== id) return r;
+        const setDates = new Set(r.completedDates || []);
+        if (setDates.has(date)) {
+          setDates.delete(date);
+        } else {
+          setDates.add(date);
+        }
+        return {...r, completedDates: Array.from(setDates)};
+      }));
+    }
+
+    const percentToday = percentCompleteToday(routines);
+    const streak = getStreak(routines);
+
+    // UI small components inside App for clarity
+    if (loading) {
+      return (
+        <div className="w-full max-w-md">
+          <div className="bg-white rounded-2xl p-6 card-shadow">
+            <div className="animate-pulse space-y-4">
+              <div className="h-6 bg-gray-200 rounded w-3/4"></div>
+              <div className="h-40 bg-gray-200 rounded"></div>
+              <div className="h-10 bg-gray-200 rounded w-1/3"></div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div className="w-full max-w-md">
+        {/* Top area */}
+        <div className="sticky top-4 z-20">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h1 className="text-lg font-semibold">Things</h1>
+              <p className="text-sm text-gray-500">Personal routines & progress</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button aria-label="Settings" onClick={()=>setPage('settings')} className="p-2 rounded-lg glass card-shadow">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden><path d="M12 15.5a3.5 3.5 0 100-7 3.5 3.5 0 000 7z" stroke="#3b3b3b" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/></svg>
+              </button>
+            </div>
+          </div>
+
+          {/* Config banner */}
+          {showConfigBanner && (
+            <div className="mb-3 p-3 rounded-xl bg-yellow-50 border border-yellow-100 text-yellow-700 text-sm">
+              Firebase not configured — app is running local-only. Paste your config in the top of the HTML to enable Firestore sync.
+              <button onClick={()=>setShowConfigBanner(false)} className="ml-2 underline">Dismiss</button>
+            </div>
+          )}
+        </div>
+
+        {/* Page content */}
+        <div className="space-y-4">
+          {page === 'dashboard' && (
+            <div className="bg-white rounded-[28px] p-4 card-shadow">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-4">
+                  <div className="ring-size flex items-center justify-center">
+                    <ProgressRing percent={percentToday} />
+                  </div>
+                  <div>
+                    <div className="text-sm text-gray-500">Today</div>
+                    <div className="text-xl font-semibold">{percentToday}%</div>
+                    <div className="text-xs text-gray-400">{routines.filter(r => r.completedDates && r.completedDates.includes(todayISO())).length} of {routines.length} done</div>
+                  </div>
+                </div>
+                <div className="text-center">
+                  <div className="text-xs text-gray-400">Streak</div>
+                  <div className="font-semibold">{streak}d</div>
+                </div>
+              </div>
+
+              <div className="mt-4 grid grid-cols-3 gap-3">
+                <QuickAction title="Fitness" color="#6FCF97" onClick={()=>{ setPage('tracker'); setActiveTab('fitness'); }} />
+                <QuickAction title="Eating" color="#FFD6A5" onClick={()=>{ setPage('tracker'); setActiveTab('eating'); }} />
+                <QuickAction title="Learning" color="#A7C7FF" onClick={()=>{ setPage('tracker'); setActiveTab('learning'); }} />
+              </div>
+
+              <div className="mt-4">
+                <h3 className="text-sm text-gray-500 mb-2">Today's routines</h3>
+                <div className="space-y-3">
+                  {routines.map(r => (
+                    <RoutineCard key={r.id} routine={r} onToggle={()=>toggleComplete(r.id)} onEdit={(patch)=>editRoutine(r.id, patch)} onDelete={()=>deleteRoutine(r.id)} />
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {page === 'tracker' && (
+            <div className="bg-white rounded-[28px] p-4 card-shadow">
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-lg font-semibold">Routine Tracker</h2>
+                <div className="flex items-center gap-2">
+                  <button onClick={()=>{ addRoutine(activeTab, `New ${activeTab} routine`, '09:00', 15); }} className="px-3 py-2 rounded-full text-sm bg-gray-100">+ Add</button>
+                </div>
+              </div>
+              <div className="flex gap-2 mb-3">
+                <Tab label="Fitness" active={activeTab==='fitness'} color="#6FCF97" onClick={()=>setActiveTab('fitness')} />
+                <Tab label="Eating" active={activeTab==='eating'} color="#FFD6A5" onClick={()=>setActiveTab('eating')} />
+                <Tab label="Learning" active={activeTab==='learning'} color="#A7C7FF" onClick={()=>setActiveTab('learning')} />
+              </div>
+
+              <div className="space-y-3">
+                {routines.filter(r => r.type === activeTab).length === 0 && (
+                  <div className="text-sm text-gray-400">No routines in this category. Add one.</div>
+                )}
+                {routines.filter(r => r.type === activeTab).map(r => (
+                  <RoutineCard key={r.id} routine={r} onToggle={()=>toggleComplete(r.id)} onEdit={(patch)=>editRoutine(r.id, patch)} onDelete={()=>deleteRoutine(r.id)} />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {page === 'analytics' && (
+            <div className="bg-white rounded-[28px] p-4 card-shadow">
+              <h2 className="text-lg font-semibold mb-2">Analytics</h2>
+              <div className="text-sm text-gray-500 mb-3">Weekly completion</div>
+              <WeeklyBars routines={routines} />
+              <div className="mt-4 grid grid-cols-2 gap-3">
+                <div className="p-3 rounded-xl bg-gray-50 text-center">
+                  <div className="text-xs text-gray-400">Current streak</div>
+                  <div className="text-xl font-semibold">{streak} days</div>
+                </div>
+                <div className="p-3 rounded-xl bg-gray-50 text-center">
+                  <div className="text-xs text-gray-400">Today completion</div>
+                  <div className="text-xl font-semibold">{percentToday}%</div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {page === 'settings' && (
+            <div className="bg-white rounded-[28px] p-4 card-shadow">
+              <h2 className="text-lg font-semibold mb-2">Settings</h2>
+              <div className="text-sm text-gray-500 mb-3">Accent theme</div>
+              <div className="flex gap-3 mb-4">
+                <ThemeChip color="#6FCF97" label="Fitness" active={accent==='fitness'} onClick={()=>setAccent('fitness')} />
+                <ThemeChip color="#FFD6A5" label="Eating" active={accent==='eating'} onClick={()=>setAccent('eating')} />
+                <ThemeChip color="#A7C7FF" label="Learning" active={accent==='learning'} onClick={()=>setAccent('learning')} />
+              </div>
+
+              <div className="mb-4">
+                <label className="flex items-center gap-3">
+                  <input type="checkbox" aria-label="Enable local reminders" defaultChecked className="h-4 w-4" />
+                  <span className="text-sm text-gray-600">Enable local reminders (browser notifications)</span>
+                </label>
+                <div className="text-xs text-gray-400 mt-1">You may be prompted to allow notifications from your browser.</div>
+              </div>
+
+              <div className="flex gap-3">
+                <button onClick={() => { if(confirm('Clear all local data?')){ localStorage.removeItem(STORAGE_KEY); localStorage.removeItem(SYNC_QUEUE_KEY); setRoutines(SAMPLE_ROUTINES); saveRoutinesSource(SAMPLE_ROUTINES); } }} className="px-4 py-2 rounded-full bg-red-50 text-red-700">Clear local data</button>
+                <button onClick={() => { alert('To clear Firestore you must delete the document "things/user_default" in your Firebase console (or replace with empty data).'); }} className="px-4 py-2 rounded-full bg-gray-100">Firestore instructions</button>
+              </div>
+
+              <div className="mt-4 text-xs text-gray-400">
+                Firebase configured: {firebaseConfigured ? 'Yes' : 'No'}. To enable Firestore sync, paste your config near the top of this HTML file.
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* bottom tab (iOS-like) */}
+        <div className="fixed left-0 right-0 bottom-6 flex justify-center z-30">
+          <div className="w-full max-w-md px-6">
+            <div className="bg-white tabbar rounded-3xl p-3 flex justify-between items-center card-shadow glass">
+              <div className="flex items-center gap-2">
+                <TabIcon label="Home" active={page==='dashboard'} onClick={()=>setPage('dashboard')} color="#8ECAE6" />
+                <TabIcon label="Tracker" active={page==='tracker'} onClick={()=>setPage('tracker')} color="#6FCF97" />
+                <TabIcon label="Analytics" active={page==='analytics'} onClick={()=>setPage('analytics')} color="#A7C7FF" />
+              </div>
+              <div className="flex items-center">
+                <button aria-label="Profile / Settings" onClick={()=>setPage('settings')} className="p-2 rounded-xl">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden><path d="M12 15.5a3.5 3.5 0 100-7 3.5 3.5 0 000 7z" stroke="#3b3b3b" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    );
+  }
+
+  /* ---------------------------
+     Subcomponents
+     --------------------------- */
+
+  function QuickAction({ title, color, onClick }) {
+    return (
+      <button onClick={onClick} className="rounded-2xl p-3 flex flex-col items-center justify-center card-shadow" style={{background: 'linear-gradient(180deg, #fff, rgba(255,255,255,0.9))'}}>
+        <div style={{width:36, height:36, borderRadius:12, background: color}} className="flex items-center justify-center text-white font-semibold">{title.slice(0,1)}</div>
+        <div className="text-xs mt-2">{title}</div>
+      </button>
+    );
+  }
+
+  function Tab({ label, active, color, onClick }) {
+    return (
+      <button onClick={onClick} className={`px-3 py-2 rounded-full text-sm ${active ? '' : 'bg-gray-100'}`} style={active ? { boxShadow: '0 6px 18px rgba(20,20,40,0.06)', background: color } : {}}>
+        {label}
+      </button>
+    );
+  }
+
+  function ThemeChip({ color, label, active, onClick }) {
+    return (
+      <button onClick={onClick} className={`p-3 rounded-xl flex items-center gap-3 ${active ? 'ring-2 ring-offset-2 ring-gray-200' : ''}`}>
+        <div style={{width:24, height:24, borderRadius:8, background: color}}></div>
+        <div className="text-sm">{label}</div>
+      </button>
+    );
+  }
+
+  function TabIcon({ label, active, onClick, color }) {
+    return (
+      <button onClick={onClick} aria-label={label} className={`p-2 rounded-lg ${active ? 'bg-gray-100' : ''}`}>
+        <div style={{width:36, height:36, borderRadius:12, background: active ? color : '#f2f2f2'}} className="flex items-center justify-center text-white text-sm font-semibold">
+          {label.slice(0,1)}
+        </div>
+      </button>
+    );
+  }
+
+  function RoutineCard({ routine, onToggle, onEdit, onDelete }) {
+    const doneToday = (routine.completedDates || []).includes(todayISO());
+    return (
+      <div className="bg-white rounded-[28px] p-3 card-shadow flex items-center justify-between">
+        <div className="flex items-start gap-3">
+          <div style={{width:46, height:46, borderRadius:12, background: routine.type==='fitness' ? '#E6FBF0' : routine.type==='eating' ? '#FFF6EB' : '#F0F6FF'}} className="flex items-center justify-center">
+            <div className="text-sm font-semibold" aria-hidden>{routine.title.slice(0,1)}</div>
+          </div>
+          <div>
+            <div className="font-medium">{routine.title}</div>
+            <div className="text-xs text-gray-400">{routine.time} • {routine.duration} min</div>
+          </div>
+        </div>
+        <div className="flex items-center gap-3">
+          <button onClick={onToggle} aria-pressed={doneToday} className={`px-3 py-2 rounded-full ${doneToday ? 'bg-gray-900 text-white' : 'bg-gray-100'}`} >
+            {doneToday ? 'Done' : 'Mark'}
+          </button>
+          <div className="flex items-center gap-1">
+            <button onClick={()=>{ const newTitle = prompt('Edit title', routine.title); if(newTitle) onEdit({ title: newTitle }); }} className="p-1 rounded-md" aria-label="Edit">✎</button>
+            <button onClick={onDelete} className="p-1 rounded-md text-red-500" aria-label="Delete">🗑</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  function ProgressRing({ percent=0 }) {
+    // SVG circle ring
+    const size = 100;
+    const stroke = 10;
+    const radius = (size - stroke) / 2;
+    const circumference = 2 * Math.PI * radius;
+    const offset = circumference - (percent / 100) * circumference;
+    return (
+      <svg className="ring-size" viewBox={`0 0 ${size} ${size}`}>
+        <defs>
+          <linearGradient id="g" x1="0" x2="1">
+            <stop offset="0%" stopColor="#A7C7FF" />
+            <stop offset="100%" stopColor="#D6C2FF" />
+          </linearGradient>
+        </defs>
+        <g transform={`translate(${size/2}, ${size/2})`}>
+          <circle r={radius} cx="0" cy="0" fill="none" stroke="#F1F3F6" strokeWidth={stroke} />
+          <circle r={radius} cx="0" cy="0" fill="none" stroke="url(#g)" strokeWidth={stroke} strokeLinecap="round"
+            strokeDasharray={circumference} strokeDashoffset={offset} style={{ transition: 'stroke-dashoffset 450ms ease' }} transform="rotate(-90)" />
+          <text x="0" y="6" textAnchor="middle" fontSize="18" fontWeight="600" fill="#111">{percent}%</text>
+        </g>
+      </svg>
+    );
+  }
+
+  /* Weekly bars based on routines' completedDates */
+  function WeeklyBars({ routines }) {
+    // Build counts for last 7 days
+    const days = [];
+    for (let i=6;i>=0;i--){
+      const dt = new Date();
+      dt.setDate(dt.getDate() - i);
+      const iso = new Date(dt.getTime() - dt.getTimezoneOffset()*60000).toISOString().slice(0,10);
+      days.push(iso);
+    }
+    const counts = days.map(d => routines.filter(r => (r.completedDates||[]).includes(d)).length);
+    const max = Math.max(...counts, 1);
+    return (
+      <div className="flex items-end gap-2 h-28">
+        {days.map((d, i) => (
+          <div key={d} className="flex-1 flex flex-col items-center">
+            <div className="w-full flex items-end">
+              <div className="rounded-xl" style={{width: '100%', height: `${(counts[i]/max)*100}%`, background: '#D6E9FF', borderRadius: '8px'}}></div>
+            </div>
+            <div className="text-xs text-gray-400 mt-2">{new Date(d).toLocaleDateString(undefined, {weekday:'short'})}</div>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  /* ---------------------------
+     Render
+     --------------------------- */
+  ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
